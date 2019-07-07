@@ -1,24 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/go-redis/redis"
 	"github.com/siddontang/go/log"
 
 	"github.com/pinpt/go-common/hash"
 )
-
-var redisClient *redis.Client
-
-func init() {
-
-	// Output: PONG <nil>
-}
 
 func setHeader(name string, r *http.Request) {
 	if obj := r.Header[name]; len(obj) > 0 {
@@ -30,35 +26,42 @@ func setHeader(name string, r *http.Request) {
 
 func mainHandler(w http.ResponseWriter, r *http.Request) {
 
-	redisClient = redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:            "localhost:6379",
+		Password:        "", // no password set
+		DB:              0,  // use default DB
+		DialTimeout:     10 * time.Second,
+		ReadTimeout:     30 * time.Second,
+		WriteTimeout:    30 * time.Second,
+		PoolSize:        10,
+		PoolTimeout:     30 * time.Second,
+		MaxRetries:      5,
+		MinRetryBackoff: time.Second * 3,
+		MaxRetryBackoff: time.Second * 6,
 	})
 
 	defer redisClient.Close()
 
-	// _, err := redisClient.Ping().Result()
-	// if err != nil {
-	// 	log.Error("Err", err)
-	// 	os.Exit(1)
-	// }
-
 	client := &http.Client{}
-
-	for k, v := range r.Header {
-		log.Info("Header "+k, v)
-	}
 
 	newURL := r.Header["X-Host"][0]
 
 	log.Info(fmt.Sprintf("url %s", newURL))
 
-	requestHash := hash.Values(newURL, r.Method)
+	postBodyBts, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		log.Error("Err", err)
+	}
+	r.Body.Close()
+	bodyReader := bytes.NewReader(postBodyBts)
+	r.Body = ioutil.NopCloser(bodyReader)
+
+	requestHash := hash.Values(newURL, r.Method, string(postBodyBts))
 	log.Info(fmt.Sprintf("hash[%s]", requestHash))
 
 	redisValue, err := redisClient.Get(requestHash).Result()
 	if err != nil && err != redis.Nil {
+		log.Error("Err", err)
 		panic(err)
 	}
 
@@ -71,8 +74,9 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			log.Error("Err", err)
 		}
 
-		setHeader("Authorization", r)
-		setHeader("Content-Type", r)
+		r.Header.Del("X-Host")
+
+		newReq.Header = r.Header
 
 		response, err := client.Do(newReq)
 
@@ -93,6 +97,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		err = redisClient.Set(requestHash, string(responseBytes), 0).Err()
 		if err != nil {
 			log.Error("Err", err)
+			panic(err)
 		}
 
 		btsHeader, err := json.Marshal(response.Header)
@@ -105,21 +110,23 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		err = redisClient.Set(requestHash+"headers", string(btsHeader), 0).Err()
 		if err != nil {
 			log.Error("Err", err)
+			panic(err)
 		}
 
 		log.Info(fmt.Sprintf("saved key in cache [%s]", requestHash))
 
-		log.Info(fmt.Sprintf("response => %s", string(responseBytes)))
+		log.Debug(fmt.Sprintf("response => %s", string(responseBytes)))
 
 		for keyHeader, valueHeader := range response.Header {
 			w.Header().Set(keyHeader, strings.Join(valueHeader, ","))
 		}
 	} else {
-		log.Info(fmt.Sprintf("using cache [%s] = > %s", requestHash, redisValue))
+		log.Debug(fmt.Sprintf("using cache [%s] = > %s", requestHash, redisValue))
 		responseBytes = []byte(redisValue)
 
 		headersValue, err := redisClient.Get(requestHash + "headers").Result()
 		if err != nil && err != redis.Nil {
+			log.Error("Err", err)
 			panic(err)
 		}
 
@@ -141,6 +148,12 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/", mainHandler)
+
+	if len(os.Args) > 1 {
+		log.SetLevelByName(os.Args[1])
+	} else {
+		log.SetLevelByName("info")
+	}
 
 	fmt.Println("server running")
 	err := http.ListenAndServe(":3645", nil)
