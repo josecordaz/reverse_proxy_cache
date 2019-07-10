@@ -11,40 +11,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis"
 	"github.com/siddontang/go/log"
 
 	"github.com/pinpt/go-common/hash"
+	iop "github.com/pinpt/go-common/io"
 	pos "github.com/pinpt/go-common/os"
 )
 
-func setHeader(name string, r *http.Request) {
-	if obj := r.Header[name]; len(obj) > 0 {
-		if nameValue := obj[0]; nameValue != "" {
-			r.Header.Add(name, nameValue)
-		}
-	}
+type storage interface {
+	Get(key string) string
+	Set(key string, value string)
 }
 
-func mainHandler(w http.ResponseWriter, r *http.Request) {
-
-	// pos.
-
-	redisClient := redis.NewClient(&redis.Options{
-		Addr:            "localhost:6379",
-		Password:        "", // no password set
-		DB:              0,  // use default DB
-		DialTimeout:     10 * time.Second,
-		ReadTimeout:     30 * time.Second,
-		WriteTimeout:    30 * time.Second,
-		PoolSize:        10,
-		PoolTimeout:     30 * time.Second,
-		MaxRetries:      5,
-		MinRetryBackoff: time.Second * 3,
-		MaxRetryBackoff: time.Second * 6,
-	})
-
-	defer redisClient.Close()
+func myHanlder(w http.ResponseWriter, r *http.Request, cache storage) {
 
 	client := &http.Client{}
 
@@ -63,15 +42,11 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 	requestHash := hash.Values(newURL, r.Method, string(postBodyBts))
 	log.Info(fmt.Sprintf("hash[%s]", requestHash))
 
-	redisValue, err := redisClient.Get(requestHash).Result()
-	if err != nil && err != redis.Nil {
-		log.Error("Err", err)
-		panic(err)
-	}
+	cacheBody := cache.Get(requestHash)
 
 	var responseBytes []byte
 
-	if redisValue == "" {
+	if cacheBody == "" {
 
 		newReq, err := http.NewRequest(r.Method, newURL, r.Body)
 		if err != nil {
@@ -98,11 +73,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			log.Errorf("Err", err)
 		}
 
-		err = redisClient.Set(requestHash, string(responseBytes), 0).Err()
-		if err != nil {
-			log.Error("Err", err)
-			panic(err)
-		}
+		cache.Set(requestHash, string(responseBytes))
 
 		btsHeader, err := json.Marshal(response.Header)
 		if err != nil {
@@ -111,11 +82,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 
 		log.Info(fmt.Sprintf("setting headers %s => %s ", requestHash, string(btsHeader)))
 
-		err = redisClient.Set(requestHash+"headers", string(btsHeader), 0).Err()
-		if err != nil {
-			log.Error("Err", err)
-			panic(err)
-		}
+		cache.Set(requestHash+"headers", string(btsHeader))
 
 		log.Info(fmt.Sprintf("saved key in cache [%s]", requestHash))
 
@@ -125,14 +92,10 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set(keyHeader, strings.Join(valueHeader, ","))
 		}
 	} else {
-		log.Debug(fmt.Sprintf("using cache [%s] = > %s", requestHash, redisValue))
-		responseBytes = []byte(redisValue)
+		log.Debug(fmt.Sprintf("using cache [%s] = > %s", requestHash, cacheBody))
+		responseBytes = []byte(cacheBody)
 
-		headersValue, err := redisClient.Get(requestHash + "headers").Result()
-		if err != nil && err != redis.Nil {
-			log.Error("Err", err)
-			panic(err)
-		}
+		headersValue := cache.Get(requestHash + "headers")
 
 		var headers map[string][]string
 
@@ -147,39 +110,96 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Write(responseBytes)
+}
 
+func mainHandler(w http.ResponseWriter, r *http.Request) {
+
+	cache := &cache{
+		mapa: make(map[string]*cacheElement),
+	}
+
+	myHanlder(w, r, cache)
+
+}
+
+type cacheElement struct {
+	value  string
+	cached bool
 }
 
 type cache struct {
 	sync.Mutex
-	mapa   map[string]string
-	cached bool
+	mapa map[string]*cacheElement
 }
 
 func (c *cache) Set(key string, value string) {
 	c.Lock()
-	c.mapa[key] = value
+	c.mapa[key] = &cacheElement{value, false}
 	defer c.Unlock()
 }
 
 func (c *cache) Get(key string) string {
 	c.Lock()
 	defer c.Unlock()
-	return c.mapa[key]
+	return c.mapa[key].value
 }
 
 func main() {
 
 	var cache cache
+	cache.mapa = make(map[string]*cacheElement)
 
-	cache.Set("esto", "eso")
+	log.Info("Loading cache")
+	// TODO generate this code
+	// Read all the info in the file and send it to the map
+	log.Info("Done")
+
+	stream, err := iop.NewJSONStream("storage.cache")
+	if err != nil {
+		panic(err)
+	}
+
+	ticker := time.NewTicker(30 * time.Second)
+	quit := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				log.Info("Saving cache to file")
+				only10 := 0
+				for _, cacheElement := range cache.mapa {
+					if !cacheElement.cached {
+						stream.Write(cacheElement)
+						cacheElement.cached = true
+						only10++
+						if only10 == 10 {
+							break
+						}
+					}
+				}
+			case <-quit:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
 
 	http.HandleFunc("/", mainHandler)
 
 	pos.OnExit(func(_ int) {
-		log.Info("Saving cache locally")
-		time.Sleep(time.Second * 20)
-		// cancel()
+		close(quit)
+		log.Info("Saving cache to file")
+		for _, cacheElement := range cache.mapa {
+			if !cacheElement.cached {
+				stream.Write(cacheElement)
+				cacheElement.cached = true
+			}
+		}
+		log.Info("Done")
+		err := stream.Close()
+		if err != nil {
+
+		}
 	})
 
 	if len(os.Args) > 1 {
@@ -188,8 +208,8 @@ func main() {
 		log.SetLevelByName("info")
 	}
 
-	fmt.Println("server running")
-	err := http.ListenAndServe(":3645", nil)
+	log.Info("server running")
+	err = http.ListenAndServe(":3645", nil)
 
 	if err != nil {
 		log.Error("Err", err)
