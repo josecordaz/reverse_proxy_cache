@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-redis/redis"
 	"github.com/siddontang/go/log"
 
 	"github.com/pinpt/go-common/hash"
+	pos "github.com/pinpt/go-common/os"
 )
 
 func setHeader(name string, r *http.Request) {
@@ -25,6 +27,8 @@ func setHeader(name string, r *http.Request) {
 }
 
 func mainHandler(w http.ResponseWriter, r *http.Request) {
+
+	// pos.
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:            "localhost:6379",
@@ -146,8 +150,37 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
+type cache struct {
+	sync.Mutex
+	mapa   map[string]string
+	cached bool
+}
+
+func (c *cache) Set(key string, value string) {
+	c.Lock()
+	c.mapa[key] = value
+	defer c.Unlock()
+}
+
+func (c *cache) Get(key string) string {
+	c.Lock()
+	defer c.Unlock()
+	return c.mapa[key]
+}
+
 func main() {
+
+	var cache cache
+
+	cache.Set("esto", "eso")
+
 	http.HandleFunc("/", mainHandler)
+
+	pos.OnExit(func(_ int) {
+		log.Info("Saving cache locally")
+		time.Sleep(time.Second * 20)
+		// cancel()
+	})
 
 	if len(os.Args) > 1 {
 		log.SetLevelByName(os.Args[1])
