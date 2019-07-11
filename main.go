@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -9,7 +10,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/siddontang/go/log"
 
@@ -115,91 +115,114 @@ func myHanlder(w http.ResponseWriter, r *http.Request, cache storage) {
 func mainHandler(w http.ResponseWriter, r *http.Request) {
 
 	cache := &cache{
-		mapa: make(map[string]*cacheElement),
+		mapa: make(map[string]*string),
 	}
 
 	myHanlder(w, r, cache)
 
 }
 
-type cacheElement struct {
-	value  string
-	cached bool
-}
-
 type cache struct {
 	sync.Mutex
-	mapa map[string]*cacheElement
+	mapa map[string]*string
 }
 
 func (c *cache) Set(key string, value string) {
 	c.Lock()
-	c.mapa[key] = &cacheElement{value, false}
+	c.mapa[key] = &value
 	defer c.Unlock()
 }
 
 func (c *cache) Get(key string) string {
 	c.Lock()
 	defer c.Unlock()
-	return c.mapa[key].value
+	return *c.mapa[key]
+}
+
+func loadCache(cache *cache) {
+
+	cacheFile, err := os.Open(cacheFileName)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer cacheFile.Close()
+
+	scanner := bufio.NewScanner(cacheFile)
+	for scanner.Scan() {
+		var cacheRecord CacheRecord
+		if err := json.Unmarshal(scanner.Bytes(), &cacheRecord); err != nil {
+			log.Error("Err", err)
+		}
+		cache.mapa[cacheRecord.key] = &cacheRecord.value
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Fatal(err)
+	}
+
+}
+
+const cacheFileName = "storage.cache"
+
+type CacheRecord struct {
+	key   string
+	value string
 }
 
 func main() {
 
 	var cache cache
-	cache.mapa = make(map[string]*cacheElement)
+
+	cache.mapa = make(map[string]*string)
 
 	log.Info("Loading cache")
+
+	loadCache(&cache)
+
 	// TODO generate this code
 	// Read all the info in the file and send it to the map
 	log.Info("Done")
 
-	stream, err := iop.NewJSONStream("storage.cache")
-	if err != nil {
-		panic(err)
-	}
-
-	ticker := time.NewTicker(30 * time.Second)
-	quit := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-ticker.C:
-				log.Info("Saving cache to file")
-				only10 := 0
-				for _, cacheElement := range cache.mapa {
-					if !cacheElement.cached {
-						stream.Write(cacheElement)
-						cacheElement.cached = true
-						only10++
-						if only10 == 10 {
-							break
-						}
-					}
-				}
-			case <-quit:
-				ticker.Stop()
-				return
-			}
-		}
-	}()
+	// ticker := time.NewTicker(30 * time.Second)
+	// quit := make(chan struct{})
+	// go func() {
+	// 	for {
+	// 		select {
+	// 		case <-ticker.C:
+	// 			log.Info("Saving cache to file")
+	// 			only10 := 0
+	// 			for _, cacheElement := range cache.mapa {
+	// 				if !cacheElement.cached {
+	// 					stream.Write(cacheElement)
+	// 					cacheElement.cached = true
+	// 					only10++
+	// 					if only10 == 10 {
+	// 						break
+	// 					}
+	// 				}
+	// 			}
+	// 		case <-quit:
+	// 			ticker.Stop()
+	// 			return
+	// 		}
+	// 	}
+	// }()
 
 	http.HandleFunc("/", mainHandler)
 
 	pos.OnExit(func(_ int) {
-		close(quit)
+		// close(quit)
 		log.Info("Saving cache to file")
-		for _, cacheElement := range cache.mapa {
-			if !cacheElement.cached {
-				stream.Write(cacheElement)
-				cacheElement.cached = true
-			}
+		stream, err := iop.NewJSONStream(cacheFileName)
+		if err != nil {
+			panic(err)
+		}
+		defer stream.Close()
+
+		for cacheKey, cacheValue := range cache.mapa {
+			stream.Write(CacheRecord{cacheKey, *cacheValue})
 		}
 		log.Info("Done")
-		err := stream.Close()
-		if err != nil {
-
-		}
 	})
 
 	if len(os.Args) > 1 {
@@ -209,8 +232,7 @@ func main() {
 	}
 
 	log.Info("server running")
-	err = http.ListenAndServe(":3645", nil)
-
+	err := http.ListenAndServe(":3645", nil)
 	if err != nil {
 		log.Error("Err", err)
 	}
