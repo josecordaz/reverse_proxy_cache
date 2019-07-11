@@ -160,6 +160,10 @@ func loadCache(cache *cache) {
 		log.Fatal(err)
 	}
 
+	if err := os.Remove(cacheFileName); err != nil {
+		log.Fatal(err)
+	}
+	log.Info("Cache restored")
 }
 
 const cacheFileName = "storage.cache"
@@ -176,43 +180,13 @@ func main() {
 	cache.mapa = make(map[string]*string)
 
 	log.Info("Loading cache")
-
 	loadCache(&cache)
-
-	// TODO generate this code
-	// Read all the info in the file and send it to the map
 	log.Info("Done")
-
-	// ticker := time.NewTicker(30 * time.Second)
-	// quit := make(chan struct{})
-	// go func() {
-	// 	for {
-	// 		select {
-	// 		case <-ticker.C:
-	// 			log.Info("Saving cache to file")
-	// 			only10 := 0
-	// 			for _, cacheElement := range cache.mapa {
-	// 				if !cacheElement.cached {
-	// 					stream.Write(cacheElement)
-	// 					cacheElement.cached = true
-	// 					only10++
-	// 					if only10 == 10 {
-	// 						break
-	// 					}
-	// 				}
-	// 			}
-	// 		case <-quit:
-	// 			ticker.Stop()
-	// 			return
-	// 		}
-	// 	}
-	// }()
 
 	http.HandleFunc("/", mainHandler)
 
 	pos.OnExit(func(_ int) {
-		// close(quit)
-		log.Info("Saving cache to file")
+		log.Info("Saving cache")
 		stream, err := iop.NewJSONStream(cacheFileName)
 		if err != nil {
 			panic(err)
@@ -222,7 +196,7 @@ func main() {
 		for cacheKey, cacheValue := range cache.mapa {
 			stream.Write(CacheRecord{cacheKey, *cacheValue})
 		}
-		log.Info("Done")
+		log.Info("Cache saved")
 	})
 
 	if len(os.Args) > 1 {
