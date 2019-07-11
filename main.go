@@ -149,11 +149,12 @@ func loadCache(cache *cache) {
 
 	scanner := bufio.NewScanner(cacheFile)
 	for scanner.Scan() {
-		var cacheRecord CacheRecord
+		var cacheRecord cacheRecord
 		if err := json.Unmarshal(scanner.Bytes(), &cacheRecord); err != nil {
 			log.Error("Err", err)
 		}
-		cache.mapa[cacheRecord.key] = &cacheRecord.value
+		cache.mapa[cacheRecord.Key] = &cacheRecord.Value
+		log.Info("Key " + cacheRecord.Key + " restored")
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -168,9 +169,9 @@ func loadCache(cache *cache) {
 
 const cacheFileName = "storage.cache"
 
-type CacheRecord struct {
-	key   string
-	value string
+type cacheRecord struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
 }
 
 func main() {
@@ -194,7 +195,8 @@ func main() {
 		defer stream.Close()
 
 		for cacheKey, cacheValue := range cache.mapa {
-			stream.Write(CacheRecord{cacheKey, *cacheValue})
+			log.Info("Key " + cacheKey + " saved")
+			stream.Write(cacheRecord{cacheKey, *cacheValue})
 		}
 		log.Info("Cache saved")
 	})
@@ -204,6 +206,11 @@ func main() {
 	} else {
 		log.SetLevelByName("info")
 	}
+
+	cache.Set("uno", "1")
+	cache.Set("dos", "2")
+	cache.Set("tres", "3")
+	cache.Set("cuatro", "4")
 
 	log.Info("server running")
 	err := http.ListenAndServe(":3645", nil)
