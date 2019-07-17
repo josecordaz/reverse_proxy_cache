@@ -13,6 +13,7 @@ import (
 
 	"github.com/siddontang/go/log"
 
+	pfiles "github.com/pinpt/go-common/fileutil"
 	"github.com/pinpt/go-common/hash"
 	iop "github.com/pinpt/go-common/io"
 	pos "github.com/pinpt/go-common/os"
@@ -23,7 +24,7 @@ type storage interface {
 	Set(key string, value string)
 }
 
-func myHanlder(w http.ResponseWriter, r *http.Request, cache storage) {
+func myHanlder(w http.ResponseWriter, r *http.Request) {
 
 	client := &http.Client{}
 
@@ -42,7 +43,7 @@ func myHanlder(w http.ResponseWriter, r *http.Request, cache storage) {
 	requestHash := hash.Values(newURL, r.Method, string(postBodyBts))
 	log.Info(fmt.Sprintf("hash[%s]", requestHash))
 
-	cacheBody := cache.Get(requestHash)
+	cacheBody := cach.Get(requestHash)
 
 	var responseBytes []byte
 
@@ -73,7 +74,7 @@ func myHanlder(w http.ResponseWriter, r *http.Request, cache storage) {
 			log.Errorf("Err", err)
 		}
 
-		cache.Set(requestHash, string(responseBytes))
+		cach.Set(requestHash, string(responseBytes))
 
 		btsHeader, err := json.Marshal(response.Header)
 		if err != nil {
@@ -82,7 +83,7 @@ func myHanlder(w http.ResponseWriter, r *http.Request, cache storage) {
 
 		log.Info(fmt.Sprintf("setting headers %s => %s ", requestHash, string(btsHeader)))
 
-		cache.Set(requestHash+"headers", string(btsHeader))
+		cach.Set(requestHash+"headers", string(btsHeader))
 
 		log.Info(fmt.Sprintf("saved key in cache [%s]", requestHash))
 
@@ -95,7 +96,7 @@ func myHanlder(w http.ResponseWriter, r *http.Request, cache storage) {
 		log.Debug(fmt.Sprintf("using cache [%s] = > %s", requestHash, cacheBody))
 		responseBytes = []byte(cacheBody)
 
-		headersValue := cache.Get(requestHash + "headers")
+		headersValue := cach.Get(requestHash + "headers")
 
 		var headers map[string][]string
 
@@ -114,57 +115,59 @@ func myHanlder(w http.ResponseWriter, r *http.Request, cache storage) {
 
 func mainHandler(w http.ResponseWriter, r *http.Request) {
 
-	cache := &cache{
-		mapa: make(map[string]*string),
-	}
-
-	myHanlder(w, r, cache)
+	myHanlder(w, r)
 
 }
 
 type cache struct {
 	sync.Mutex
-	mapa map[string]*string
+	mapa map[string]string
 }
 
 func (c *cache) Set(key string, value string) {
 	c.Lock()
-	c.mapa[key] = &value
+	c.mapa[key] = value
 	defer c.Unlock()
 }
 
 func (c *cache) Get(key string) string {
 	c.Lock()
 	defer c.Unlock()
-	return *c.mapa[key]
+	if value, ok := c.mapa[key]; ok {
+		return value
+	}
+	return ""
 }
 
-func loadCache(cache *cache) {
+func loadCache() {
 
-	cacheFile, err := os.Open(cacheFileName)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer cacheFile.Close()
+	if pfiles.FileExists(cacheFileName) {
 
-	scanner := bufio.NewScanner(cacheFile)
-	for scanner.Scan() {
-		var cacheRecord cacheRecord
-		if err := json.Unmarshal(scanner.Bytes(), &cacheRecord); err != nil {
-			log.Error("Err", err)
+		cacheFile, err := os.Open(cacheFileName)
+		if err != nil {
+			log.Fatal(err)
 		}
-		cache.mapa[cacheRecord.Key] = &cacheRecord.Value
-		log.Info("Key " + cacheRecord.Key + " restored")
-	}
+		defer cacheFile.Close()
 
-	if err := scanner.Err(); err != nil {
-		log.Fatal(err)
-	}
+		scanner := bufio.NewScanner(cacheFile)
+		for scanner.Scan() {
+			var cacheRecord cacheRecord
+			if err := json.Unmarshal(scanner.Bytes(), &cacheRecord); err != nil {
+				log.Error("Err", err)
+			}
+			cach.mapa[cacheRecord.Key] = cacheRecord.Value
+			log.Info("Key " + cacheRecord.Key + " restored")
+		}
 
-	if err := os.Remove(cacheFileName); err != nil {
-		log.Fatal(err)
+		if err := scanner.Err(); err != nil {
+			log.Fatal(err)
+		}
+
+		if err := os.Remove(cacheFileName); err != nil {
+			log.Fatal(err)
+		}
+		log.Info("Cache restored")
 	}
-	log.Info("Cache restored")
 }
 
 const cacheFileName = "storage.cache"
@@ -174,14 +177,16 @@ type cacheRecord struct {
 	Value string `json:"value"`
 }
 
+var cach *cache
+
 func main() {
 
-	var cache cache
-
-	cache.mapa = make(map[string]*string)
+	cach = &cache{
+		mapa: make(map[string]string),
+	}
 
 	log.Info("Loading cache")
-	loadCache(&cache)
+	loadCache()
 	log.Info("Done")
 
 	http.HandleFunc("/", mainHandler)
@@ -194,9 +199,9 @@ func main() {
 		}
 		defer stream.Close()
 
-		for cacheKey, cacheValue := range cache.mapa {
+		for cacheKey, cacheValue := range cach.mapa {
 			log.Info("Key " + cacheKey + " saved")
-			stream.Write(cacheRecord{cacheKey, *cacheValue})
+			stream.Write(cacheRecord{cacheKey, cacheValue})
 		}
 		log.Info("Cache saved")
 	})
@@ -206,11 +211,6 @@ func main() {
 	} else {
 		log.SetLevelByName("info")
 	}
-
-	cache.Set("uno", "1")
-	cache.Set("dos", "2")
-	cache.Set("tres", "3")
-	cache.Set("cuatro", "4")
 
 	log.Info("server running")
 	err := http.ListenAndServe(":3645", nil)
